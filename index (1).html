@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Acute Rehab Scheduler</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    
+    // Setup localStorage storage API BEFORE the component
+    if (typeof window.storage === 'undefined') {
+      window.storage = {
+        get: async (key) => {
+          try {
+            const value = localStorage.getItem(key);
+            return value ? { value } : null;
+          } catch (error) {
+            console.error('Storage get error:', error);
+            return null;
+          }
+        },
+        set: async (key, value) => {
+          try {
+            localStorage.setItem(key, value);
+            return { key, value };
+          } catch (error) {
+            console.error('Storage set error:', error);
+            return null;
+          }
+        }
+      };
+    }
+
+    function RehabScheduler() {
+      const [patients, setPatients] = useState([]);
+      const [therapists, setTherapists] = useState([]);
+      const [sessions, setSessions] = useState([]);
+      const [currentDate, setCurrentDate] = useState(new Date());
+      const [view, setView] = useState('schedule');
+      const [showModal, setShowModal] = useState(null);
+      const [editing, setEditing] = useState(null);
+      const [alerts, setAlerts] = useState([]);
+
+      const therapyColors = {
+        PT: { bg: 'bg-blue-500', light: 'bg-blue-50', text: 'text-blue-700' },
+        OT: { bg: 'bg-green-500', light: 'bg-green-50', text: 'text-green-700' },
+        ST: { bg: 'bg-purple-500', light: 'bg-purple-50', text: 'text-purple-700' }
+      };
+
+      const getDateKey = (date) => new Date(date).toISOString().split('T')[0];
+      const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
+      const getDayOfWeek = (date) => new Date(date).getDay();
+      const getDayName = (date) => ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][getDayOfWeek(date)];
+      const isWeekend = (date) => { const day = getDayOfWeek(date); return day === 0 || day === 6; };
+
+      const calculateWeeklyDate = (admissionDate) => {
+        const admission = new Date(admissionDate);
+        const dayOfWeek = getDayOfWeek(admission);
+        if (dayOfWeek === 6) return getDateKey(addDays(admission, 6));
+        if (dayOfWeek === 0) return getDateKey(addDays(admission, 1));
+        return getDateKey(addDays(admission, 7));
+      };
+
+      const parseSpeechFrequency = (frequency) => {
+        if (!frequency) return { duration: 60, daysPerWeek: 7 };
+        const lower = frequency.toLowerCase();
+        let duration = 60;
+        let daysPerWeek = 7;
+        if (lower.includes('30')) duration = 30;
+        else if (lower.includes('45')) duration = 45;
+        if (lower.includes('3 days') || lower.includes('3x')) daysPerWeek = 3;
+        else if (lower.includes('5 days') || lower.includes('5x')) daysPerWeek = 5;
+        return { duration, daysPerWeek };
+      };
+
+      const isTherapistAvailable = (therapist, date, time) => {
+        if (!therapist) return false;
+        const dayName = getDayName(date);
+        const dateKey = getDateKey(date);
+        if (therapist.daysOff?.includes(dateKey)) return false;
+        if (!therapist.workDays?.includes(dayName)) return false;
+        const hour = parseInt(time.split(':')[0]);
+        if (hour === 12) return false;
+        if (therapist.startTime) {
+          const startHour = parseInt(therapist.startTime.split(':')[0]);
+          const endHour = parseInt(therapist.endTime.split(':')[0]);
+          if (hour < startHour + 1 || hour >= endHour - 1) return false;
+        }
+        return true;
+      };
+
+      useEffect(() => {
+        const loadData = async () => {
+          try {
+            const [p, t, s] = await Promise.all([
+              window.storage.get('rehab-patients'),
+              window.storage.get('rehab-therapists'),
+              window.storage.get('rehab-sessions')
+            ]);
+            if (p?.value) setPatients(JSON.parse(p.value));
+            if (t?.value) setTherapists(JSON.parse(t.value));
+            if (s?.value) setSessions(JSON.parse(s.value));
+          } catch (e) {
+            console.error('Load error:', e);
+          }
+        };
+        loadData();
+      }, []);
+
+      useEffect(() => {
+        const saveData = async () => {
+          try {
+            await Promise.all([
+              window.storage.set('rehab-patients', JSON.stringify(patients)),
+              window.storage.set('rehab-therapists', JSON.stringify(therapists)),
+              window.storage.set('rehab-sessions', JSON.stringify(sessions))
+            ]);
+          } catch (e) {
+            console.error('Save error:', e);
+          }
+        };
+        if (patients.length > 0 || therapists.length > 0 || sessions.length > 0) {
+          saveData();
+        }
+      }, [patients, therapists, sessions]);
+
+      const TherapistModal = () => {
+        const [form, setForm] = useState(editing || {
+          id: `t-${Date.now()}`,
+          name: '',
+          discipline: 'PT',
+          type: 'fulltime',
+          workDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+          daysOff: [],
+          startTime: '07:30',
+          endTime: '16:00'
+        });
+
+        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+            <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold text-gray-800">{editing ? 'Edit' : 'Add'} Therapist</h2>
+                <button onClick={() => { setShowModal(null); setEditing(null); }} className="text-gray-400 hover:text-gray-600">
+                  ✕
+                </button>
+              </div>
+              
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const existing = therapists.find(t => t.id === form.id);
+                if (existing) {
+                  setTherapists(therapists.map(t => t.id === form.id ? form : t));
+                } else {
+                  setTherapists([...therapists, form]);
+                }
+                setShowModal(null);
+                setEditing(null);
+              }} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-gray-700">Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={form.name}
+                    onChange={(e) => setForm({...form, name: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500"
+                    placeholder="John Smith"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2 text-gray-700">Discipline *</label>
+                    <select
+                      required
+                      value={form.discipline}
+                      onChange={(e) => setForm({...form, discipline: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    >
+                      <option value="PT">PT</option>
+                      <option value="OT">OT</option>
+                      <option value="ST">ST</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2 text-gray-700">Type *</label>
+                    <select
+                      required
+                      value={form.type}
+                      onChange={(e) => setForm({...form, type: e.target.value})}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    >
+                      <option value="fulltime">Full-time</option>
+                      <option value="perdiem">Per Diem</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-gray-700">Work Days</label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {days.map(day => (
+                      <label key={day} className="flex items-center gap-2 cursor-pointer p-2">
+                        <input
+                          type="checkbox"
+                          checked={form.workDays?.includes(day)}
+                          onChange={(e) => {
+                            const newDays = e.target.checked 
+                              ? [...(form.workDays || []), day]
+                              : (form.workDays || []).filter(d => d !== day);
+                            setForm({...form, workDays: newDays});
+                          }}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-xs text-gray-700">{day.substring(0, 3)}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">12-1pm lunch daily</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Start Time</label>
+                    <input
+                      type="time"
+                      value={form.startTime}
+                      onChange={(e) => setForm({...form, startTime: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    />
+                    <p className="text-xs text-gray-500">+30min doc</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">End Time</label>
+                    <input
+                      type="time"
+                      value={form.endTime}
+                      onChange={(e) => setForm({...form, endTime: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    />
+                    <p className="text-xs text-gray-500">-30min doc</p>
+                  </div>
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => { setShowModal(null); setEditing(null); }}
+                    className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700"
+                  >
+                    {editing ? 'Update' : 'Add'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      };
+
+      const PatientModal = () => {
+        const [form, setForm] = useState(editing || {
+          id: editing?.id || `p-${Date.now()}`,
+          roomNumber: '',
+          admissionDate: getDateKey(new Date()),
+          disciplines: ['PT', 'OT'],
+          primaryPT: '',
+          primaryOT: '',
+          primaryST: '',
+          schedulingNotes: '',
+          speechFrequency: ''
+        });
+
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" style={{backgroundColor: 'rgba(0,0,0,0.5)'}}>
+            <div className="bg-white rounded-xl max-w-2xl w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold">Admit Patient</h2>
+                <button onClick={() => { setShowModal(null); setEditing(null); }}>✕</button>
+              </div>
+
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                if (editing) {
+                  setPatients(patients.map(p => p.id === editing.id ? form : p));
+                } else {
+                  setPatients([...patients, form]);
+                }
+                setShowModal(null);
+                setEditing(null);
+              }} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Room Number *</label>
+                    <input
+                      type="text"
+                      required
+                      value={form.roomNumber}
+                      onChange={(e) => setForm({...form, roomNumber: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                      placeholder="101"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Admission Date *</label>
+                    <input
+                      type="date"
+                      required
+                      value={form.admissionDate}
+                      onChange={(e) => setForm({...form, admissionDate: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Disciplines *</label>
+                  <div className="flex gap-4">
+                    {['PT', 'OT', 'ST'].map(disc => (
+                      <label key={disc} className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={form.disciplines.includes(disc)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setForm({...form, disciplines: [...form.disciplines, disc]});
+                            } else {
+                              setForm({...form, disciplines: form.disciplines.filter(d => d !== disc)});
+                            }
+                          }}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-sm font-medium">{disc}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {form.disciplines.includes('PT') && (
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Primary PT *</label>
+                    <select
+                      required
+                      value={form.primaryPT}
+                      onChange={(e) => setForm({...form, primaryPT: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    >
+                      <option value="">Select therapist</option>
+                      {therapists.filter(t => t.discipline === 'PT').map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {form.disciplines.includes('OT') && (
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Primary OT *</label>
+                    <select
+                      required
+                      value={form.primaryOT}
+                      onChange={(e) => setForm({...form, primaryOT: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    >
+                      <option value="">Select therapist</option>
+                      {therapists.filter(t => t.discipline === 'OT').map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {form.disciplines.includes('ST') && (
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Primary ST *</label>
+                    <select
+                      required
+                      value={form.primaryST}
+                      onChange={(e) => setForm({...form, primaryST: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                    >
+                      <option value="">Select therapist</option>
+                      {therapists.filter(t => t.discipline === 'ST').map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                    <label className="block text-sm font-medium mb-2 mt-4">Speech Frequency</label>
+                    <input
+                      type="text"
+                      value={form.speechFrequency}
+                      onChange={(e) => setForm({...form, speechFrequency: e.target.value})}
+                      className="w-full px-3 py-2 border rounded-lg"
+                      placeholder="e.g., '30 minutes 3 days/week'"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Examples: "30 minutes", "45 minutes 5 days/week"</p>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Scheduling Notes</label>
+                  <textarea
+                    value={form.schedulingNotes}
+                    onChange={(e) => setForm({...form, schedulingNotes: e.target.value})}
+                    className="w-full px-3 py-2 border rounded-lg"
+                    rows="2"
+                    placeholder="e.g., 'PT only after 10am'"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => { setShowModal(null); setEditing(null); }}
+                    className="flex-1 px-4 py-2 bg-gray-200 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 px-4 py-2 bg-teal-600 text-white rounded-lg"
+                  >
+                    {editing ? 'Update' : 'Admit Patient'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      };
+
+      const getDaySessions = (date) => {
+        const dateKey = getDateKey(date);
+        return sessions.filter(s => s.date === dateKey).sort((a, b) => a.time.localeCompare(b.time));
+      };
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-teal-50">
+          <div className="bg-white shadow-lg border-b-4 border-teal-500">
+            <div className="max-w-7xl mx-auto px-4 py-4">
+              <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="bg-teal-600 p-2 rounded-lg">
+                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                      <line x1="16" y1="2" x2="16" y2="6"/>
+                      <line x1="8" y1="2" x2="8" y2="6"/>
+                      <line x1="3" y1="10" x2="21" y2="10"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-bold text-gray-800">Acute Rehab Scheduler</h1>
+                    <p className="text-sm text-gray-600">HIPAA Compliant Scheduling</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setShowModal('patient'); setEditing(null); }}
+                    className="bg-teal-600 text-white px-4 py-2 rounded-lg hover:bg-teal-700 text-sm"
+                  >
+                    + Admit
+                  </button>
+                  <button
+                    onClick={() => { setShowModal('therapist'); setEditing(null); }}
+                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 text-sm"
+                  >
+                    + Staff
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex gap-2 mb-3">
+                {['schedule', 'patients', 'staff'].map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    className={`px-4 py-2 rounded-t-lg font-medium text-sm ${
+                      view === v ? 'bg-teal-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    }`}
+                  >
+                    {v.charAt(0).toUpperCase() + v.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="max-w-7xl mx-auto px-4 py-6">
+            {view === 'schedule' && (
+              <div>
+                <div className="bg-white rounded-xl shadow-lg p-4 mb-6">
+                  <div className="flex items-center justify-between gap-3">
+                    <button
+                      onClick={() => setCurrentDate(addDays(currentDate, -1))}
+                      className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+                    >
+                      ← Prev
+                    </button>
+                    <div className="text-center flex-1">
+                      <div className="font-bold text-xl">
+                        {currentDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setCurrentDate(addDays(currentDate, 1))}
+                      className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+                    >
+                      Next →
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-lg p-6">
+                  <h2 className="text-lg font-bold mb-4">Sessions</h2>
+                  {getDaySessions(currentDate).length === 0 ? (
+                    <div className="text-center py-12 text-gray-500">No sessions scheduled</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {getDaySessions(currentDate).map(session => {
+                        const patient = patients.find(p => p.id === session.patientId);
+                        const therapist = therapists.find(t => t.id === session.therapistId);
+                        
+                        return (
+                          <div key={session.id} className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded-r-lg">
+                            <div className="font-bold text-blue-700">
+                              Room {session.roomNumber} - {session.time}
+                            </div>
+                            <div className="text-sm text-gray-600">
+                              {therapist?.name || 'No therapist assigned'}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {view === 'patients' && (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {patients.length === 0 ? (
+                  <div className="col-span-full text-center py-16 bg-white rounded-xl shadow-lg">
+                    <p className="text-gray-500 mb-4">No patients admitted</p>
+                    <button
+                      onClick={() => { setShowModal('patient'); setEditing(null); }}
+                      className="bg-teal-600 text-white px-6 py-2 rounded-lg"
+                    >
+                      Admit First Patient
+                    </button>
+                  </div>
+                ) : (
+                  patients.map(patient => (
+                    <div key={patient.id} className="bg-white border-2 rounded-xl p-5 shadow-lg">
+                      <div className="flex justify-between items-start mb-3">
+                        <div>
+                          <div className="font-bold text-xl">Room {patient.roomNumber}</div>
+                          <div className="text-sm text-gray-600">
+                            {new Date(patient.admissionDate).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => { setEditing(patient); setShowModal('patient'); }}
+                          className="p-2 hover:bg-gray-100 rounded"
+                        >
+                          Edit
+                        </button>
+                      </div>
+                      {patient.speechFrequency && (
+                        <div className="bg-purple-50 p-2 rounded mb-2">
+                          <div className="text-xs font-semibold">Speech: {patient.speechFrequency}</div>
+                        </div>
+                      )}
+                      {patient.schedulingNotes && (
+                        <div className="bg-blue-50 p-2 rounded">
+                          <div className="text-xs">{patient.schedulingNotes}</div>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {view === 'staff' && (
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl font-bold">Staff Management</h2>
+                  <button
+                    onClick={() => { setShowModal('therapist'); setEditing(null); }}
+                    className="bg-teal-600 text-white px-4 py-2 rounded-lg"
+                  >
+                    + Add Therapist
+                  </button>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {['PT', 'OT', 'ST'].map(discipline => {
+                    const disciplineTherapists = therapists.filter(t => t.discipline === discipline);
+                    
+                    return (
+                      <div key={discipline} className="border-2 rounded-xl p-5">
+                        <div className="font-bold text-xl mb-4">
+                          {discipline === 'PT' ? 'Physical Therapy' : discipline === 'OT' ? 'Occupational Therapy' : 'Speech Therapy'}
+                        </div>
+                        {disciplineTherapists.length === 0 ? (
+                          <div className="text-sm text-gray-400 text-center py-8">No therapists</div>
+                        ) : (
+                          <div className="space-y-3">
+                            {disciplineTherapists.map(therapist => (
+                              <div key={therapist.id} className="bg-white rounded-lg border p-3">
+                                <div className="flex justify-between items-start">
+                                  <div>
+                                    <div className="font-semibold">{therapist.name}</div>
+                                    <div className="text-xs text-gray-500">{therapist.type}</div>
+                                    {therapist.startTime && (
+                                      <div className="text-xs text-gray-600">{therapist.startTime} - {therapist.endTime}</div>
+                                    )}
+                                  </div>
+                                  <button
+                                    onClick={() => { setEditing(therapist); setShowModal('therapist'); }}
+                                    className="p-1 hover:bg-gray-100 rounded"
+                                  >
+                                    Edit
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {showModal === 'therapist' && <TherapistModal />}
+          {showModal === 'patient' && <PatientModal />}
+        </div>
+      );
+    }
+
+    // Render the app
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<RehabScheduler />);
+  </script>
+</body>
+</html>
